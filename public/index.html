@@ -27,14 +27,21 @@
         }
         .success { background: #d4edda; color: #155724; }
         .error { background: #f8d7da; color: #721c24; }
+        #roomId {
+            padding: 10px;
+            margin: 5px;
+            width: 200px;
+        }
     </style>
 </head>
 <body>
     <h1>Voice Chat</h1>
     <div id="status"></div>
     <div class="controls">
-        <button id="startButton">Start Call</button>
-        <button id="stopButton" disabled>End Call</button>
+        <input type="text" id="roomId" placeholder="Enter room ID">
+        <button id="createButton">Create Room</button>
+        <button id="joinButton">Join Room</button>
+        <button id="leaveButton" disabled>Leave Room</button>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
@@ -42,15 +49,35 @@
         const socket = io();
         let peerConnection;
         let localStream;
+        let currentRoom;
         
+        // Extended ICE configuration with multiple STUN/TURN servers
         const configuration = {
             iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' }
-            ]
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+                // Free TURN server (you should replace this with your own in production)
+                {
+                    urls: 'turn:openrelay.metered.ca:80',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                },
+                {
+                    urls: 'turn:openrelay.metered.ca:443',
+                    username: 'openrelayproject',
+                    credential: 'openrelayproject'
+                }
+            ],
+            iceCandidatePoolSize: 10,
         };
 
-        const startButton = document.getElementById('startButton');
-        const stopButton = document.getElementById('stopButton');
+        const createButton = document.getElementById('createButton');
+        const joinButton = document.getElementById('joinButton');
+        const leaveButton = document.getElementById('leaveButton');
+        const roomIdInput = document.getElementById('roomId');
         const statusDiv = document.getElementById('status');
 
         function updateStatus(message, type = 'success') {
@@ -58,47 +85,65 @@
             statusDiv.className = type;
         }
 
-        async function startCall() {
+        async function createRoom() {
+            const roomId = roomIdInput.value.trim() || Math.random().toString(36).substring(7);
+            roomIdInput.value = roomId;
+            
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                startButton.disabled = true;
-                stopButton.disabled = false;
-                
-                createPeerConnection();
-                
-                localStream.getTracks().forEach(track => {
-                    peerConnection.addTrack(track, localStream);
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: true,
+                    video: false
                 });
-
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-                socket.emit('offer', offer);
                 
-                updateStatus('Starting call... Waiting for someone to join');
+                currentRoom = roomId;
+                socket.emit('join-room', roomId);
+                
+                createButton.disabled = true;
+                joinButton.disabled = true;
+                leaveButton.disabled = false;
+                
+                updateStatus(`Room created! Share this room ID: ${roomId}`);
             } catch (error) {
-                updateStatus('Error starting call: ' + error.message, 'error');
-                console.error('Error starting call:', error);
+                updateStatus('Error accessing microphone: ' + error.message, 'error');
             }
         }
 
-        function stopCall() {
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
+        async function joinRoom() {
+            const roomId = roomIdInput.value.trim();
+            if (!roomId) {
+                updateStatus('Please enter a room ID', 'error');
+                return;
             }
-            if (peerConnection) {
-                peerConnection.close();
+
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: true,
+                    video: false
+                });
+                
+                currentRoom = roomId;
+                socket.emit('join-room', roomId);
+                
+                createButton.disabled = true;
+                joinButton.disabled = true;
+                leaveButton.disabled = false;
+                
+                updateStatus('Joined room, connecting...');
+            } catch (error) {
+                updateStatus('Error accessing microphone: ' + error.message, 'error');
             }
-            startButton.disabled = false;
-            stopButton.disabled = true;
-            updateStatus('Call ended');
         }
 
-        function createPeerConnection() {
+        function createPeerConnection(userId) {
             peerConnection = new RTCPeerConnection(configuration);
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
 
             peerConnection.onicecandidate = event => {
                 if (event.candidate) {
-                    socket.emit('ice-candidate', event.candidate);
+                    socket.emit('ice-candidate', event.candidate, currentRoom);
                 }
             };
 
@@ -106,44 +151,65 @@
                 updateStatus('Connected! Remote audio stream received');
                 const remoteAudio = new Audio();
                 remoteAudio.srcObject = event.streams[0];
-                remoteAudio.play();
+                remoteAudio.autoplay = true;
+                remoteAudio.play().catch(console.error);
             };
 
-            peerConnection.onconnectionstatechange = event => {
+            peerConnection.onconnectionstatechange = () => {
                 if (peerConnection.connectionState === 'connected') {
                     updateStatus('Peer connection established!');
                 }
             };
+
+            return peerConnection;
         }
 
-        socket.on('offer', async (offer) => {
-            try {
-                if (!localStream) {
-                    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                }
-                
-                if (!peerConnection) {
-                    createPeerConnection();
-                    localStream.getTracks().forEach(track => {
-                        peerConnection.addTrack(track, localStream);
-                    });
-                }
+        function leaveRoom() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            
+            socket.emit('leave-room', currentRoom);
+            currentRoom = null;
+            
+            createButton.disabled = false;
+            joinButton.disabled = false;
+            leaveButton.disabled = true;
+            updateStatus('Left the room');
+        }
 
+        // Socket.io event handlers
+        socket.on('user-connected', async (userId) => {
+            updateStatus('Another user joined, initiating connection...');
+            peerConnection = createPeerConnection(userId);
+            
+            try {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                socket.emit('offer', offer, currentRoom);
+            } catch (error) {
+                console.error('Error creating offer:', error);
+            }
+        });
+
+        socket.on('offer', async (offer, userId) => {
+            try {
+                peerConnection = createPeerConnection(userId);
                 await peerConnection.setRemoteDescription(offer);
+                
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                socket.emit('answer', answer);
                 
-                startButton.disabled = true;
-                stopButton.disabled = false;
-                updateStatus('Joining call...');
+                socket.emit('answer', answer, currentRoom, userId);
             } catch (error) {
-                updateStatus('Error joining call: ' + error.message, 'error');
                 console.error('Error handling offer:', error);
             }
         });
 
-        socket.on('answer', async (answer) => {
+        socket.on('answer', async (answer, userId) => {
             try {
                 await peerConnection.setRemoteDescription(answer);
             } catch (error) {
@@ -151,7 +217,7 @@
             }
         });
 
-        socket.on('ice-candidate', async (candidate) => {
+        socket.on('ice-candidate', async (candidate, userId) => {
             try {
                 if (peerConnection) {
                     await peerConnection.addIceCandidate(candidate);
@@ -161,8 +227,16 @@
             }
         });
 
-        startButton.addEventListener('click', startCall);
-        stopButton.addEventListener('click', stopCall);
+        socket.on('user-disconnected', (userId) => {
+            updateStatus('Other user disconnected');
+            if (peerConnection) {
+                peerConnection.close();
+            }
+        });
+
+        createButton.addEventListener('click', createRoom);
+        joinButton.addEventListener('click', joinRoom);
+        leaveButton.addEventListener('click', leaveRoom);
     </script>
 </body>
 </html>
