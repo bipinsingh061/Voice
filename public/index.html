@@ -1,0 +1,168 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        #status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>Voice Chat</h1>
+    <div id="status"></div>
+    <div class="controls">
+        <button id="startButton">Start Call</button>
+        <button id="stopButton" disabled>End Call</button>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        let peerConnection;
+        let localStream;
+        
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const statusDiv = document.getElementById('status');
+
+        function updateStatus(message, type = 'success') {
+            statusDiv.textContent = message;
+            statusDiv.className = type;
+        }
+
+        async function startCall() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                
+                createPeerConnection();
+                
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                socket.emit('offer', offer);
+                
+                updateStatus('Starting call... Waiting for someone to join');
+            } catch (error) {
+                updateStatus('Error starting call: ' + error.message, 'error');
+                console.error('Error starting call:', error);
+            }
+        }
+
+        function stopCall() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            updateStatus('Call ended');
+        }
+
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                updateStatus('Connected! Remote audio stream received');
+                const remoteAudio = new Audio();
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.play();
+            };
+
+            peerConnection.onconnectionstatechange = event => {
+                if (peerConnection.connectionState === 'connected') {
+                    updateStatus('Peer connection established!');
+                }
+            };
+        }
+
+        socket.on('offer', async (offer) => {
+            try {
+                if (!localStream) {
+                    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                }
+                
+                if (!peerConnection) {
+                    createPeerConnection();
+                    localStream.getTracks().forEach(track => {
+                        peerConnection.addTrack(track, localStream);
+                    });
+                }
+
+                await peerConnection.setRemoteDescription(offer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('answer', answer);
+                
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                updateStatus('Joining call...');
+            } catch (error) {
+                updateStatus('Error joining call: ' + error.message, 'error');
+                console.error('Error handling offer:', error);
+            }
+        });
+
+        socket.on('answer', async (answer) => {
+            try {
+                await peerConnection.setRemoteDescription(answer);
+            } catch (error) {
+                console.error('Error handling answer:', error);
+            }
+        });
+
+        socket.on('ice-candidate', async (candidate) => {
+            try {
+                if (peerConnection) {
+                    await peerConnection.addIceCandidate(candidate);
+                }
+            } catch (error) {
+                console.error('Error adding ICE candidate:', error);
+            }
+        });
+
+        startButton.addEventListener('click', startCall);
+        stopButton.addEventListener('click', stopCall);
+    </script>
+</body>
+</html>
